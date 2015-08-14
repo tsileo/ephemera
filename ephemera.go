@@ -82,6 +82,8 @@ func (c *Container) Kill() {
 
 type Ephemera struct {
 	sync.Mutex
+	ttl        time.Duration
+	image      string
 	containers map[string]*Container
 	docker     *dockerclient.DockerClient
 	handler    http.Handler
@@ -89,11 +91,13 @@ type Ephemera struct {
 
 func (e *Ephemera) KillAll() {
 	for _, c := range e.containers {
+		log.Printf("kill %v", c)
 		c.Kill()
 	}
 }
-func (e *Ephemera) Handler() http.Handler {
-	return e.handler
+func (e *Ephemera) RegisterHandler(r *mux.Router) {
+	r.HandleFunc("/demo/new", e.newHandler)
+	r.PathPrefix("/demo/{id}").Handler(http.HandlerFunc(e.proxyHandler))
 }
 
 func (e *Ephemera) NewContainer(img string, ttl time.Duration) *Container {
@@ -112,34 +116,36 @@ func (e *Ephemera) NewContainer(img string, ttl time.Duration) *Container {
 	e.containers[container.Name] = container
 	return container
 }
+
 func (e *Ephemera) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
-	log.Println("/app/%v requested", id)
+	log.Println("/demo/%v requested", id)
 	if c, ok := e.containers[id]; ok {
 		c.Proxy.ServeHTTP(w, r)
 		return
 	}
 	log.Printf("unknown id %v", id)
 }
+
 func (e *Ephemera) newHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("New container request")
-	c := e.NewContainer("fiorix/freegeoip", 60*time.Second)
+	c := e.NewContainer(e.image, e.ttl)
 	c.Start()
 	log.Printf("container started: %v", c)
 	go c.WaitKill()
 	u, _ := url.Parse(fmt.Sprintf("http://%v:8080", c.IP))
-	c.Proxy = http.StripPrefix("/app/"+c.Name, httputil.NewSingleHostReverseProxy(u))
-	log.Printf("container proxy setup /app/%v => %v", c.Name, c.IP)
+	c.Proxy = http.StripPrefix("/demo/"+c.Name, httputil.NewSingleHostReverseProxy(u))
+	log.Printf("container proxy setup /demo/%v => %v", c.Name, c.IP)
 	if r.URL.Query().Get("redirect") != "0" {
-		http.Redirect(w, r, "/app/"+c.Name, http.StatusTemporaryRedirect)
+		http.Redirect(w, r, "/demo/"+c.Name, http.StatusTemporaryRedirect)
 		return
 	}
 	w.Write([]byte(c.Name))
 	return
 }
 
-func New(dockerURI string) (*Ephemera, error) {
+func New(dockerURI, image string, ttl time.Duration) (*Ephemera, error) {
 	if dockerURI == "" {
 		dockerURI = "unix:///var/run/docker.sock"
 	}
@@ -151,35 +157,10 @@ func New(dockerURI string) (*Ephemera, error) {
 	if dockerDebug {
 		docker.StartMonitorEvents(eventCallback, nil)
 	}
-	e := &Ephemera{
+	return &Ephemera{
 		containers: map[string]*Container{},
 		docker:     docker,
-	}
-	r := mux.NewRouter()
-	r.StrictSlash(true)
-	r.HandleFunc("/new", e.newHandler)
-	r.PathPrefix("/{id}").Handler(http.HandlerFunc(e.proxyHandler))
-	e.handler = r
-	//http.Handle("/", r)
-	//go func() {
-	//	if err := http.ListenAndServe(":8081", nil); err != nil {
-	//		log.Fatal("ListenAndServe: ", err)
-	//	}
-	//}()
-	return e, nil
+		ttl:        ttl,
+		image:      image,
+	}, nil
 }
-
-//sc := make(chan os.Signal, 1)
-//signal.Notify(sc,
-//	syscall.SIGHUP,
-//	syscall.SIGINT,
-//	syscall.SIGTERM,
-//	syscall.SIGQUIT,
-//	syscall.SIGKILL,
-//	os.Interrupt)
-//<-sc
-//for _, c := range containers {
-//	log.Printf("kill %v", c)
-//	c.Kill()
-//}
-//}
