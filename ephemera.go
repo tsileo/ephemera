@@ -14,11 +14,17 @@ import (
 	"github.com/satori/go.uuid"
 )
 
+var (
+	containerPrefix = "ephemera"
+	dockerDebug     = false
+)
+
 // Callback used to listen to Docker's events
 func eventCallback(event *dockerclient.Event, ec chan error, args ...interface{}) {
 	log.Printf("Received event: %#v\n", *event)
 }
 
+// Container represents a ephemeral container.
 type Container struct {
 	Name      string
 	ID        string
@@ -32,24 +38,19 @@ type Container struct {
 	e         *Ephemera
 }
 
-var (
-	containerPrefix = "ephemera"
-	dockerDebug     = false
-)
-
-func UUID() string {
-	return uuid.NewV4().String()
-}
-
+// WaitKill blocks till the TTL is elapsed and kill the container.
 func (c *Container) WaitKill() {
 	<-time.After(c.TTL)
 	c.Kill()
 	return
 }
+
+// String implements fmt.Stringer
 func (c *Container) String() string {
 	return fmt.Sprintf("<Container %v [img=%v,started=%v,ttl=%v]>", c.Name, c.Config.Image, c.Started, c.TTL)
 }
 
+// Start actually start the container
 func (c *Container) Start() {
 	if c.Started {
 		return
@@ -72,6 +73,7 @@ func (c *Container) Start() {
 	c.StartedAt = time.Now()
 }
 
+// Kill stops and removes the container.
 func (c *Container) Kill() {
 	c.e.Lock()
 	defer c.e.Unlock()
@@ -89,23 +91,28 @@ type Ephemera struct {
 	handler    http.Handler
 }
 
+// KillAll kills all the spawned containers still alive.
 func (e *Ephemera) KillAll() {
 	for _, c := range e.containers {
 		log.Printf("kill %v", c)
 		c.Kill()
 	}
 }
+
+// RegisterHandler registers /demo/new and /demo/{id} routes.
 func (e *Ephemera) RegisterHandler(r *mux.Router) {
 	r.HandleFunc("/demo/new", e.newHandler)
 	r.PathPrefix("/demo/{id}").Handler(http.HandlerFunc(e.proxyHandler))
 }
 
+// Spawn a new container with the given Docker image and TTL.
+// The container will be killed only if WaitKill/Kill is called manually.
 func (e *Ephemera) NewContainer(img string, ttl time.Duration) *Container {
 	e.Lock()
 	defer e.Unlock()
 	container := &Container{
 		e:       e,
-		Name:    UUID(),
+		Name:    uuid.NewV4().String(),
 		Image:   img,
 		TTL:     ttl,
 		Started: false,
@@ -145,6 +152,7 @@ func (e *Ephemera) newHandler(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+// New initializes a new Ephemera instance.
 func New(dockerURI, image string, ttl time.Duration) (*Ephemera, error) {
 	if dockerURI == "" {
 		dockerURI = "unix:///var/run/docker.sock"
